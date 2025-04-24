@@ -11,8 +11,8 @@ console = Console()
 
 def run_header_audit():
     clear_console()
-    console.print(Panel.fit("[b]󰝸 Security Headers Auditor[/b]", 
-                             style="#a29bfe", padding=(1,2)))
+    (console.print(Panel.fit("[b]󰝸 Security Headers Auditor[/b]", 
+                             style="#a29bfe", padding=(1,2))))
     
     url = console.input("\n[bold]󰅂  Enter target URL (e.g., https://example.com): [/] ").strip()
 

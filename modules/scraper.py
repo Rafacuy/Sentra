@@ -9,7 +9,7 @@ console = Console()
 
 def run_scraper():
     clear_console()
-    console.print(Panel.fit("[b]󰛡 Website Scraping Engine[/b]", 
+    console.print(Panel.fit("[b]Website Scraping Engine[/b]", 
                             style="#51CBD1", padding=(1,2)))
     
     url = console.input("Enter the website URL to scrape (e.g., https://example.com): ").strip()

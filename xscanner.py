@@ -7,6 +7,8 @@ from core.utils import clear_console, load_wordlist
 from core.banner import display_header
 from core.menu import show_menu
 from rich.console import Console
+from rich.layout import Layout
+from rich.panel import Panel
 from modules import subdomain, ssl_inspector, vulnerability, header_audit, scraper
 
 console = Console()
@@ -16,11 +18,12 @@ def main():
 
     while True:
         clear_console()
+        
         display_header()
         choice = show_menu()
 
         if choice == '1':
-            subdomain.run_subdomain_scanner(wordlist)
+            subdomain.run_subdomain_scanner()
         elif choice == '2':
             ssl_inspector.run_ssl_inspector()
         elif choice == '3':
@@ -30,10 +33,10 @@ def main():
         elif choice == '5':
             scraper.run_scraper()
         elif choice == '6':
-            console.print("[bold red]󰩈  Exiting XScanner...[/bold red]")
+            console.print("[bold red]\n  Exiting XScanner... \n[/bold red]")
             sys.exit(0)
         else:
-            console.print("[bold red]⨯  Invalid selection![/bold red]")
+            console.print("[bold red]  Invalid selection![/bold red]")
 
         console.input("\n[dim]Press Enter to return to main menu...[/dim]")
 

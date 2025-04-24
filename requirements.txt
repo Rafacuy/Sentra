@@ -1,0 +1,13 @@
+dnspython
+
+rich
+
+requests
+
+colorama
+
+collection
+
+beautifulsoup4
+
+cryptography
