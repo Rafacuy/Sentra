@@ -15,7 +15,9 @@ def show_menu():
         ("3", "Web Vulnerability Scanner"),
         ("4", "Security Header Audit"),
         ("5", "Website Scraper"),
-        ("6", "Exit")
+        ("6", "Admin Page Finder"),
+        ("7", "Directory BruteForcer"),
+        ("8", "Exit")
     ]
 
     lines = []
@@ -33,6 +35,6 @@ def show_menu():
     )
 
     console.print(panel)
-    return console.input("\n[bold red][  +  ] Select one of the available options (1-6): [/] ")
+    return console.input("\n[bold red][  +  ] Select one of the available options (1-8): [/] ")
 
 

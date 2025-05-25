@@ -7,7 +7,7 @@ console = Console()
 def clear_console():
     os.system('cls' if os.name == 'nt' else 'clear')
 
-def load_wordlist(path='wordlist.txt'):
+def load_wordlist(path='wordlists/subdomain.txt'):
     try:
         with open(path, 'r') as file:
             return [line.strip() for line in file if line.strip()]

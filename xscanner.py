@@ -9,13 +9,13 @@ from core.menu import show_menu
 from rich.console import Console
 from rich.layout import Layout
 from rich.panel import Panel
-from modules import subdomain, ssl_inspector, vulnerability, header_audit, scraper
+from modules import subdomain, ssl_inspector, vulnerability, header_audit, scraper, admin_finder, dir_bruteforcer
 
 console = Console()
 
 def main():
     wordlist = load_wordlist()
-
+    
     while True:
         clear_console()
         
@@ -33,6 +33,10 @@ def main():
         elif choice == '5':
             scraper.run_scraper()
         elif choice == '6':
+            admin_finder.main()
+        elif choice == '7':
+            dir_bruteforcer.run_bruteforce()       
+        elif choice == '8':
             console.print("[bold red]\n  Exiting XScanner... \n[/bold red]")
             sys.exit(0)
         else:
