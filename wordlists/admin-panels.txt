@@ -4,6 +4,7 @@ adm/
 adm/admloginuser.php
 adm_auth.php
 adm.html
+auth.php
 admin/
 admin2/index.php
 admin2/login.php
