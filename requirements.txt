@@ -6,8 +6,16 @@ requests
 
 colorama
 
-collection
+collections
 
 beautifulsoup4
 
 cryptography
+
+tenacity
+
+datetime
+
+pathlib
+
+socks

@@ -1,4 +1,6 @@
-# __main__.py
+# sentra.py
+# AUTHOR: Rafacuy
+
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -37,7 +39,7 @@ def main():
         elif choice == '7':
             dir_bruteforcer.run_bruteforce()       
         elif choice == '8':
-            console.print("[bold red]\n  Exiting XScanner... \n[/bold red]")
+            console.print("[bold red]\n  Exiting Sentra... \n[/bold red]")
             sys.exit(0)
         else:
             console.print("[bold red]  Invalid selection![/bold red]")
@@ -48,5 +50,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        console.print("\n[bold red]󰩈  Operation cancelled by user![/bold red]")
+        console.print("\n[bold red]Operation cancelled by user![/bold red]")
         sys.exit(1)
