@@ -56,6 +56,14 @@ pip install -r requirements.txt
 python sentra.py
 ```
 
+### Trouble installing on Termux?
+
+If you're facing issues with `cryptography` or build tools, just run:
+```bash
+bash FIX.sh # Only for termux users
+```
+This script will auto-install Termux dependencies for you.
+
 ---
 
 ## Requirements
