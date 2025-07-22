@@ -79,7 +79,7 @@ echo -e "${GREEN} ✓ System upgrade complete!${RESET}"
 # Install dependencies
 echo -e "\n${YELLOW}[⚙] INSTALLING BUILD DEPENDENCIES${RESET}"
 echo -e "${CYAN}   (Python, Clang, libffi, OpenSSL, Rust, Git)${RESET}"
-(pkg install -y python clang libffi openssl rust git > /dev/null 2>&1) &
+(pkg install -y python clang libffi openssl rust git golang > /dev/null 2>&1) &
 spinner $!
 echo -e "${GREEN} ✓ Build tools installed!${RESET}"
 
@@ -101,6 +101,13 @@ echo -e "${CYAN}   (This may take 3-5 minutes)${RESET}"
 (pip install cryptography > /dev/null 2>&1) &
 spinner $!
 echo -e "${GREEN} ✓ Cryptography installed!${RESET}"
+
+# install tls-client
+echo -e "\n${YELLOW}[⚙] INSTALLING tls-client LIBRARY${RESET}"
+echo -e "${CYAN}   (This may take 2-4 minutes)${RESET}"
+(go install github.com/bp0lr/tls-client@latest) &
+spinner $!
+echo -e "${GREEN} ✓ tls-client installed!${RESET}"
 
 # Install requirements
 echo -e "\n${YELLOW}[⚙] INSTALLING PROJECT REQUIREMENTS${RESET}"

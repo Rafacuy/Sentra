@@ -10,7 +10,7 @@ collection
 
 beautifulsoup4
 
-cryptography
+cryptography>=42.0.0
 
 tenacity
 

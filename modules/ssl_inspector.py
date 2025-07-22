@@ -2,6 +2,8 @@
 import socket
 import ssl
 import json
+import time
+import subprocess
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from cryptography import x509
@@ -10,7 +12,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.progress import Progress
 from core.utils import clear_console
 
 console = Console()
@@ -32,21 +33,23 @@ def export_results(results: Dict[str, Any], host: str):
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             if choice == 'json':
-                # Custom JSON encoder to handle datetime objects
-                class DateTimeEncoder(json.JSONEncoder):
+                class CustomEncoder(json.JSONEncoder):
                     def default(self, o):
                         if isinstance(o, datetime):
                             return o.isoformat()
                         if isinstance(o, x509.Certificate):
-                            return o.subject.rfc4514_string()
+                            try:
+                                return o.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
+                            except (x509.ExtensionNotFound, IndexError):
+                                return o.subject.rfc4514_string()
                         return super().default(o)
-                json.dump(results, f, indent=4, cls=DateTimeEncoder)
+                json.dump(results, f, indent=4, cls=CustomEncoder)
             elif choice == 'txt':
                 for key, value in results.items():
-                    f.write(f"--- {key.upper()} ---\n")
+                    f.write(f"--- {key.replace('_', ' ').upper()} ---\n")
                     if isinstance(value, dict):
                         for sub_key, sub_value in value.items():
-                            f.write(f"{sub_key}: {sub_value}\n")
+                            f.write(f"{sub_key.replace('_', ' ').capitalize()}: {sub_value}\n")
                     elif isinstance(value, list):
                         for item in value:
                             f.write(f"- {item}\n")
@@ -64,42 +67,38 @@ def calculate_tls_score(results: Dict[str, Any]) -> Tuple[str, int]:
     score = 100
     grade = "A+"
 
-    # Protocol penalties
-    if results['protocols'].get('SSLv3', False):
-        score -= 40
-    if results['protocols'].get('TLSv1.0', False):
+    protocols = results['protocols']
+    if not protocols.get('TLSv1.3', False):
+        score -= 5
+    if not protocols.get('TLSv1.2', False):
         score -= 20
-    if results['protocols'].get('TLSv1.1', False):
-        score -= 10
+    if protocols.get('TLSv1.1', False):
+        score -= 20
+    if protocols.get('TLSv1.0', False):
+        score -= 30
+    if protocols.get('SSLv3', False):
+        score -= 40
 
-    # Cipher strength penalties
     if results['cipher_analysis']['strength'] == 'Weak':
         score -= 30
     elif results['cipher_analysis']['strength'] == 'Moderate':
         score -= 10
     
-    # Key size penalties
     key_size = results['certificate_details']['key_size']
     if isinstance(key_size, int) and key_size < 2048:
         score -= 20
 
-    # Validity penalties
-    if results['validity']['is_expired']:
+    if results['validity']['is_expired'] or results['validity']['is_not_yet_valid']:
         score = 0
-    if results['validity']['is_not_yet_valid']:
-        score = 0
-    if 0 < results['validity']['days_remaining'] <= 14:
+    elif 0 < results['validity']['days_remaining'] <= 14:
         score -= 10
 
-    # Self-signed penalty
     if results['certificate_details'].get('is_self_signed', False):
         score -= 50
 
-    # Incomplete chain penalty
     if not results['chain_details'].get('is_chain_complete', True):
         score -= 20
 
-    # Map score to grade
     if score >= 95: grade = "A+"
     elif score >= 80: grade = "A"
     elif score >= 65: grade = "B"
@@ -107,102 +106,128 @@ def calculate_tls_score(results: Dict[str, Any]) -> Tuple[str, int]:
     elif score >= 35: grade = "D"
     else: grade = "F"
     
-    # Cap score at 0
+    if results['validity']['is_expired'] or results['validity']['is_not_yet_valid']:
+        grade = "F"
+        
     score = max(0, score)
-
     return grade, score
 
 
 def resolve_host(host: str) -> Optional[str]:
-    """Resolve hostname to IP address with error handling"""
+    """Resolve hostname to IP address with error handling."""
     try:
         with console.status("[bold green]Resolving DNS...[/]", spinner="earth"):
             return socket.gethostbyname(host)
     except socket.gaierror as e:
         console.print(f"[bold red]DNS Resolution Error: {str(e)}[/bold red]")
-        if "Name or service not known" in str(e):
-            console.print("[yellow]Tip: Check if the domain name is spelled correctly[/yellow]")
         return None
     except Exception as e:
         console.print(f"[bold red]Unexpected DNS Error: {str(e)}[/bold red]")
         return None
 
 def get_certificate_details(cert: x509.Certificate) -> Dict:
-    """Parse X.509 certificate details using cryptography"""
+    """Parse X.509 certificate details using cryptography."""
     details = {
         'subject': {attr.oid._name: attr.value for attr in cert.subject},
         'issuer': {attr.oid._name: attr.value for attr in cert.issuer},
         'sans': [],
         'key_size': 'Unknown',
         'sig_algorithm': cert.signature_algorithm_oid._name,
-        'extensions': {},
         'is_self_signed': cert.issuer == cert.subject
     }
-    
     try:
         san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
         details['sans'] = san_ext.value.get_values_for_type(x509.DNSName)
     except x509.ExtensionNotFound:
         pass
-    
     pub_key = cert.public_key()
     if isinstance(pub_key, (rsa.RSAPublicKey, dsa.DSAPublicKey)):
         details['key_size'] = pub_key.key_size
     elif isinstance(pub_key, ec.EllipticCurvePublicKey):
         details['key_size'] = pub_key.curve.key_size
-    
     return details
 
-def check_protocol_support(host: str, port: int) -> Dict[str, bool]:
-    """Check supported SSL/TLS protocols"""
-    protocols = {
-        'SSLv3': False, 'TLSv1.0': False, 'TLSv1.1': False,
-        'TLSv1.2': False, 'TLSv1.3': False
-    }
+def check_tls_with_tls_client(host: str) -> Dict:
+    """
+    Uses the external 'tls-client' tool as a fallback to detect TLS version
+    and cipher suite, which can help bypass certain TLS fingerprinting defenses.
+    """
+    console.print("[yellow]Standard protocol check failed. Attempting fallback with 'tls-client'...[/yellow]")
+    console.print("[dim]This requires 'tls-client' to be installed and in your system's PATH.[/dim]")
     
-    # TLSv1.2 & TLSv1.3 (modern check)
-    try:
-        ctx = ssl.create_default_context()
-        with ctx.wrap_socket(socket.socket(), server_hostname=host) as s:
-            s.settimeout(3)
-            s.connect((host, port))
-            version = s.version()
-            if version == 'TLSv1.3':
-                protocols['TLSv1.3'] = True
-                protocols['TLSv1.2'] = True # TLS 1.3 capable servers must support 1.2
-            elif version == 'TLSv1.2':
-                protocols['TLSv1.2'] = True
-    except Exception:
-        pass # Will be caught by main connection logic if it fails
+    command = ["tls-client", "-u", f"https://{host}", "-j"]
+    result = {}
 
-    # Test older protocols
-    test_protocols = {
-        'TLSv1.0': ssl.PROTOCOL_TLSv1,
-        'TLSv1.1': ssl.PROTOCOL_TLSv1_1,
+    try:
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15
+        )
+        client_data = json.loads(process.stdout)
+        
+        if "tls_version" in client_data and "cipher_suite" in client_data:
+            result = {
+                "tls_version": client_data["tls_version"],
+                "cipher_suite": client_data["cipher_suite"]
+            }
+            console.print(f"[green]✔ Fallback successful. Detected {result['tls_version']}[/green]")
+        else:
+            console.print("[red]✖ Fallback failed: Unexpected JSON structure from tls-client.[/red]")
+
+    except FileNotFoundError:
+        console.print("[bold red]✖ Fallback Error: 'tls-client' command not found.[/bold red]")
+    except subprocess.CalledProcessError as e:
+        console.print(f"[bold red]✖ Fallback Error: tls-client exited with an error.[/bold red]")
+        console.print(f"[dim]Stderr: {e.stderr.strip()}[/dim]")
+    except json.JSONDecodeError:
+        console.print("[bold red]✖ Fallback Error: Failed to parse JSON output from tls-client.[/bold red]")
+    except subprocess.TimeoutExpired:
+        console.print("[bold red]✖ Fallback Error: tls-client command timed out.[/bold red]")
+    except Exception as e:
+        console.print(f"[bold red]✖ An unexpected error occurred during fallback: {e}[/bold red]")
+        
+    return result
+
+def check_protocol_support(host: str, port: int) -> Dict[str, bool]:
+    """Explicitly check for each major SSL/TLS protocol version."""
+    supported_protocols = {
+        'TLSv1.3': False, 'TLSv1.2': False, 'TLSv1.1': False, 'TLSv1.0': False
     }
-    
-    for name, proto in test_protocols.items():
+    protocols_to_test = [
+        ('TLSv1.3', ssl.PROTOCOL_TLS_CLIENT, {'minimum_version': ssl.TLSVersion.TLSv1_3}),
+        ('TLSv1.2', ssl.PROTOCOL_TLS_CLIENT, {'minimum_version': ssl.TLSVersion.TLSv1_2, 'maximum_version': ssl.TLSVersion.TLSv1_2}),
+        ('TLSv1.1', ssl.PROTOCOL_TLS_CLIENT, {'minimum_version': ssl.TLSVersion.TLSv1_1, 'maximum_version': ssl.TLSVersion.TLSv1_1}),
+        ('TLSv1.0', ssl.PROTOCOL_TLS_CLIENT, {'minimum_version': ssl.TLSVersion.TLSv1, 'maximum_version': ssl.TLSVersion.TLSv1}),
+    ]
+
+    console.print("[cyan]Checking supported protocols...[/cyan]")
+    for name, protocol_version, version_config in protocols_to_test:
+        ctx = ssl.SSLContext(protocol_version)
+        ctx.minimum_version = version_config.get('minimum_version', ssl.TLSVersion.SSLv3)
+        ctx.maximum_version = version_config.get('maximum_version', ssl.TLSVersion.TLSv1_3)
         try:
-            ctx = ssl.SSLContext(proto)
-            ctx.verify_mode = ssl.CERT_NONE
-            with ctx.wrap_socket(socket.socket(), server_hostname=host) as s:
-                s.settimeout(2)
-                s.connect((host, port))
-                protocols[name] = True
+            with socket.create_connection((host, port), timeout=2) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host):
+                    supported_protocols[name] = True
         except (ssl.SSLError, socket.timeout, ConnectionRefusedError, OSError):
-            protocols[name] = False
+            supported_protocols[name] = False
+        except Exception:
+            supported_protocols[name] = False
             
-    return protocols
+    return supported_protocols
 
 
 def analyze_cipher(cipher: Tuple) -> Dict:
-    """Analyze cipher strength and vulnerabilities"""
+    """Analyze cipher strength and vulnerabilities."""
     name, _, bits = cipher
     analysis = {'strength': 'Strong', 'color': 'green', 'details': []}
     
-    if bits < 128:
+    if bits is not None and bits < 128:
         analysis.update({'strength': 'Weak', 'color': 'red'})
-    elif 128 <= bits < 256:
+    elif bits is not None and 128 <= bits < 256:
         analysis.update({'strength': 'Moderate', 'color': 'yellow'})
     
     weak_patterns = ['RC4', '3DES', 'MD5', 'CBC', 'EXPORT', 'NULL']
@@ -210,31 +235,40 @@ def analyze_cipher(cipher: Tuple) -> Dict:
         if pattern in name.upper():
             analysis['details'].append(f"Contains weak element: {pattern}")
             analysis['color'] = 'red'
+            analysis['strength'] = 'Weak'
     
     if 'GCM' in name or 'CHACHA20' in name:
         analysis['details'].append("Uses modern AEAD encryption")
     
     return analysis
 
-# --- Certificate Chain Check ---
-def check_certificate_chain(sock: ssl.SSLSocket) -> Dict:
-    """Retrieves and analyzes the certificate chain."""
-    chain_details = {'chain': [], 'is_chain_complete': False, 'chain_length': 0}
+def check_certificate_chain(host: str, port: int) -> Dict:
+    """Retrieves and analyzes the full certificate chain from the server."""
+    chain_details = {'chain': [], 'is_chain_complete': False, 'chain_length': 0, 'error': None}
     try:
-        # Get the full chain in DER format
-        der_certs = sock.getpeercert(True)
-        pem_certs = [ssl.DER_cert_to_PEM_cert(der) for der in der_certs]
+        context = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=5) as sock:
+            with context.wrap_socket(sock, server_hostname=host) as ssock:
+                der_certs = ssock.get_verified_chain()
+                if not der_certs:
+                    der_certs_binary = ssock.getpeercert(binary_form=True)
+                    if der_certs_binary:
+                         der_certs = [x509.load_der_x509_certificate(der_certs_binary)]
+                    else:
+                        raise ConnectionError("Could not retrieve certificate chain.")
+
+                pem_certs = [ssl.DER_cert_to_PEM_cert(der.public_bytes(default_backend())) for der in der_certs]
         
         chain = [x509.load_pem_x509_certificate(c.encode(), default_backend()) for c in pem_certs]
         chain_details['chain'] = chain
         chain_details['chain_length'] = len(chain)
 
-        # Basic validation: Check if issuer of cert N matches subject of cert N+1
-        is_ordered = all(
-            chain[i].issuer == chain[i+1].subject for i in range(len(chain) - 1)
-        )
-        
-        # A chain is considered complete if the last cert is self-signed (root CA)
+        if not chain:
+            chain_details['error'] = "No certificate chain received from server."
+            chain_details['is_chain_complete'] = False
+            return chain_details
+
+        is_ordered = all(chain[i].issuer == chain[i+1].subject for i in range(len(chain) - 1))
         last_cert_is_root = chain[-1].issuer == chain[-1].subject
         
         if is_ordered and last_cert_is_root:
@@ -242,137 +276,137 @@ def check_certificate_chain(sock: ssl.SSLSocket) -> Dict:
 
     except Exception as e:
         chain_details['error'] = str(e)
+        chain_details['is_chain_complete'] = False
+        chain_details['chain_length'] = len(chain_details.get('chain', []))
         
     return chain_details
 
 def run_ssl_inspector():
     clear_console()
-    console.print(Panel.fit("[b]🔒 SSL/TLS Inspector[/b] v3.0", 
+    console.print(Panel.fit("[b]🔒 SSL/TLS Inspector[/b] v3.2 (Refactored)", 
                           style="bold #00a8ff", border_style="#00a8ff", padding=(1,2)))
     
     while True:
         target = console.input("\n[bold]➤ Enter target (e.g., google.com): [/]").strip()
-        
-        if not target:
-            console.print("[yellow]Please enter a target host.[/yellow]")
-            continue
+        if not target: continue
             
-        host, port = (target.split(':', 1) + ['443'])[:2]
-        try:
-            port = int(port)
-        except ValueError:
-            console.print(f"[red]Invalid port: {port}[/red]")
-            continue
+        host, port_str = (target.split(':', 1) + ['443'])[:2]
+        try: port = int(port_str)
+        except ValueError: console.print(f"[red]Invalid port: {port_str}[/red]"); continue
         
         ip = resolve_host(host)
-        if not ip:
-            continue
+        if not ip: continue
             
-        # This will hold all our results for display and export
         scan_results = {}
+        connection_success = False
+        
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                ctx = ssl.create_default_context()
+                with socket.create_connection((host, port), timeout=10) as sock:
+                    with console.status(f"[green]Performing SSL handshake (Attempt {attempt + 1}/{max_retries})...[/]", spinner="bouncingBall"):
+                        s = ctx.wrap_socket(sock, server_hostname=host)
+                    
+                    console.print("[green]✔ Handshake successful.[/green]")
+                    cert_der = s.getpeercert(binary_form=True)
+                    cert = x509.load_der_x509_certificate(cert_der, default_backend())
+                    
+                    scan_results['host_info'] = {'host': host, 'port': port, 'ip': ip}
+                    scan_results['certificate_details'] = get_certificate_details(cert)
+                    scan_results['protocols'] = check_protocol_support(host, port)
+                    scan_results['cipher'] = s.cipher()
+                    scan_results['cipher_analysis'] = analyze_cipher(s.cipher())
+                    scan_results['chain_details'] = check_certificate_chain(host, port)
+                    
+                    # --- Fallback Logic ---
+                    protocols = scan_results['protocols']
+                    if all(supported is False for supported in protocols.values()):
+                        fallback_result = check_tls_with_tls_client(host)
+                        if fallback_result and "tls_version" in fallback_result:
+                            protocols['note'] = "Detected via tls-client fallback"
+                            version_map = {
+                                "TLS 1.3": "TLSv1.3",
+                                "TLS 1.2": "TLSv1.2",
+                                "TLS 1.1": "TLSv1.1",
+                                "TLS 1.0": "TLSv1.0",
+                            }
+                            version_key = version_map.get(fallback_result["tls_version"].strip(), None)
 
-        try:
-            ctx = ssl.create_default_context()
-            with ctx.wrap_socket(socket.socket(), server_hostname=host) as s:
-                s.settimeout(10)
-                with console.status("[bold green]Performing SSL handshake...[/]", spinner="bouncingBall"):
-                    s.connect((host, port))
-                
-                # --- Main Data Collection ---
-                cert_der = s.getpeercert(binary_form=True)
-                cert = x509.load_der_x509_certificate(cert_der, default_backend())
-                
-                scan_results['host_info'] = {'host': host, 'port': port, 'ip': ip}
-                scan_results['certificate_details'] = get_certificate_details(cert)
-                scan_results['protocols'] = check_protocol_support(host, port)
-                scan_results['cipher'] = s.cipher()
-                scan_results['cipher_analysis'] = analyze_cipher(s.cipher())
-                scan_results['chain_details'] = check_certificate_chain(s)
-                
-                # --- NEW: Enhanced Validity Check ---
-                not_after = cert.not_valid_after_utc
-                not_before = cert.not_valid_before_utc
-                now = datetime.utcnow()
-                scan_results['validity'] = {
-                    'not_valid_after': not_after,
-                    'not_valid_before': not_before,
-                    'days_remaining': (not_after - now).days,
-                    'is_expired': now > not_after,
-                    'is_not_yet_valid': now < not_before
-                }
-                
-                # --- TLS Score ---
-                grade, score = calculate_tls_score(scan_results)
-                scan_results['tls_score'] = {'grade': grade, 'score': score}
+                            if version_key in protocols:
+                                protocols[version_key] = True
+                            # Override cipher info with fallback data
+                            scan_results['cipher'] = (fallback_result['cipher_suite'], 'Fallback', 'N/A')
+                            scan_results['cipher_analysis']['strength'] = 'Unknown'
+                            scan_results['cipher_analysis']['color'] = 'cyan'
+                    
+                    now = datetime.now(datetime.now().astimezone().tzinfo)
+                    scan_results['validity'] = {
+                        'not_valid_after': cert.not_valid_after_utc,
+                        'not_valid_before': cert.not_valid_before_utc,
+                        'days_remaining': (cert.not_valid_after_utc - now).days,
+                        'is_expired': now > cert.not_valid_after_utc,
+                        'is_not_yet_valid': now < cert.not_valid_before_utc
+                    }
+                    
+                    grade, score = calculate_tls_score(scan_results)
+                    scan_results['tls_score'] = {'grade': grade, 'score': score}
+                    connection_success = True
+                    break
 
-                # --- Build and Print Output ---
-                console.rule(f"[bold]Scan Report for {host}:{port}[/bold]", style="#00a8ff")
-                
-                # Score Panel
-                score_color = {"A+": "green", "A": "green", "B": "yellow", "C": "yellow", "D": "red", "F": "red"}.get(grade, "red")
-                console.print(
-                    Panel(f"[{score_color} bold]{grade}[/]", title="[bold]Overall Grade[/]", 
-                          style=score_color, width=20, height=3, padding=(0, 4))
-                )
-
-                # Certificate Panel
-                cert_details = scan_results['certificate_details']
-                cert_info = (
-                    f"[bold]Common Name:[/] {cert_details['subject'].get('commonName', 'N/A')}\n"
-                    f"[bold]SANs:[/] {', '.join(cert_details['sans'][:3])}{'...' if len(cert_details['sans']) > 3 else ''}\n"
-                    f"[bold]Issuer:[/] {cert_details['issuer'].get('organizationName', 'N/A')}\n"
-                )
-                if cert_details['is_self_signed']:
-                    cert_info += "[bold red]⚠️ Self-Signed Certificate[/bold red]\n"
-                
-                console.print(Panel(cert_info, title="[bold #00a8ff]Certificate[/]", expand=False))
-
-                # Details Table
-                details_table = Table(show_header=False, box=None, padding=(0, 1))
-                details_table.add_column(style="bold #00a8ff")
-                details_table.add_column()
-
-                # Validity
-                validity = scan_results['validity']
-                validity_style = "green" if validity['days_remaining'] > 30 else "yellow" if validity['days_remaining'] > 0 else "red"
-                validity_text = f"[{validity_style}]Expires in {validity['days_remaining']} days ({validity['not_valid_after'].strftime('%Y-%m-%d')})[/{validity_style}]"
-                if validity['is_expired']:
-                    validity_text = "[bold red]❌ Certificate has expired![/bold red]"
-                if validity['is_not_yet_valid']:
-                    validity_text = f"[bold red]⚠️ Certificate not valid until {validity['not_valid_before'].strftime('%Y-%m-%d')}[/bold red]"
-                details_table.add_row("Validity", validity_text)
-
-                # Protocols
-                proto_status = ' '.join([f"[{'green' if supported else 'red'}]{p.replace('TLSv', '1.')}[/]" for p, supported in scan_results['protocols'].items()])
-                details_table.add_row("Protocols", proto_status)
-
-                # Cipher
-                cipher_analysis = scan_results['cipher_analysis']
-                cipher_text = f"[{cipher_analysis['color']}]{scan_results['cipher'][0]} ({scan_results['cipher'][2]} bits)[/{cipher_analysis['color']}]"
-                details_table.add_row("Cipher Suite", cipher_text)
-
-                # Chain
-                chain = scan_results['chain_details']
-                chain_color = "green" if chain['is_chain_complete'] else "yellow"
-                chain_text = f"[{chain_color}]{chain['chain_length']} certs found. Chain complete: {chain['is_chain_complete']}[/{chain_color}]"
-                details_table.add_row("Cert Chain", chain_text)
-
-                console.print(Panel(details_table, title="[bold #00a8ff]Security Details[/]", expand=False))
-                
-                export_results(scan_results, host)
+            except socket.timeout:
+                console.print(f"[yellow]Connection timeout on attempt {attempt + 1}. Retrying...[/yellow]")
+                time.sleep(1)
+            except Exception as e:
+                console.print(f"[bold red]An error occurred: {type(e).__name__} - {e}[/bold red]")
                 break
 
-        except ssl.SSLCertVerificationError as e:
-            console.print(f"[bold red]SSL Certificate Error: {e.args[0]}[/bold red]")
-            console.print("[yellow]The server's certificate could not be verified. It might be self-signed, expired, or issued by an untrusted CA.[/yellow]")
-        except socket.timeout:
-            console.print("[bold red]Connection timeout: Server is not responding.[/bold red]")
-        except ConnectionRefusedError:
-            console.print(f"[bold red]Connection refused: Port {port} may be closed.[/bold red]")
-        except ssl.SSLError as e:
-            console.print(f"[bold red]SSL Error: {str(e)}[/bold red]")
-        except Exception as e:
-            console.print(f"[bold red]An unexpected error occurred: {type(e).__name__} - {e}[/bold red]")
+        if not connection_success:
+            console.print("[bold red]❌ Failed to connect to the server after all attempts.[/bold red]")
+        else:
+            # --- Build and Print Output ---
+            console.rule(f"[bold]Scan Report for {host}:{port}[/bold]", style="#00a8ff")
+            
+            grade, score = scan_results['tls_score']['grade'], scan_results['tls_score']['score']
+            score_color = {"A+": "green", "A": "green", "B": "yellow", "C": "yellow", "D": "red", "F": "red"}.get(grade, "red")
+            console.print(Panel(f"[{score_color} bold]{grade}[/]\nScore: {score}/100", title="[bold]Overall Grade[/]", style=score_color, width=25))
+
+            cert_details = scan_results['certificate_details']
+            cert_info = (f"[bold]Common Name:[/] {cert_details['subject'].get('commonName', 'N/A')}\n"
+                         f"[bold]SANs:[/] {', '.join(cert_details['sans'][:3])}{'...' if len(cert_details['sans']) > 3 else ''}\n"
+                         f"[bold]Issuer:[/] {cert_details['issuer'].get('organizationName', 'N/A')}\n")
+            if cert_details['is_self_signed']: cert_info += "[bold red]⚠️ Self-Signed Certificate[/bold red]\n"
+            console.print(Panel(cert_info, title="[bold #00a8ff]Certificate[/]", expand=False))
+
+            details_table = Table(show_header=False, box=None, padding=(0, 1))
+            details_table.add_column(style="bold #00a8ff"); details_table.add_column()
+
+            validity = scan_results['validity']
+            v_style = "green" if validity['days_remaining'] > 30 else "yellow" if validity['days_remaining'] > 0 else "red"
+            v_text = f"[{v_style}]Expires in {validity['days_remaining']} days ({validity['not_valid_after']:%Y-%m-%d})[/{v_style}]"
+            if validity['is_expired']: v_text = "[bold red]❌ Certificate has expired![/bold red]"
+            if validity['is_not_yet_valid']: v_text = f"[bold red]⚠️ Not valid until {validity['not_valid_before']:%Y-%m-%d}[/bold red]"
+            details_table.add_row("Validity", v_text)
+
+            protocols = scan_results['protocols']
+            proto_note = protocols.pop('note', None)
+            proto_status = ' '.join([f"[{'green' if sup else 'red'}]{p.replace('TLSv', '1.')}[/]" for p, sup in protocols.items()])
+            if proto_note: proto_status += " [dim cyan](Fallback Used)[/dim cyan]"
+            details_table.add_row("Protocols", proto_status)
+
+            c_analysis = scan_results['cipher_analysis']
+            c_text = f"[{c_analysis['color']}]{scan_results['cipher'][0]} ({scan_results['cipher'][2]} bits)[/{c_analysis['color']}]"
+            details_table.add_row("Cipher Suite", c_text)
+
+            chain = scan_results['chain_details']
+            chain_color = "green" if chain['is_chain_complete'] else "yellow"
+            chain_text = f"[{chain_color}]{chain['chain_length']} certs found. Complete: {chain['is_chain_complete']}[/{chain_color}]"
+            if chain['error']: chain_text += f"\n[dim yellow]({chain['error']})[/dim yellow]"
+            details_table.add_row("Cert Chain", chain_text)
+
+            console.print(Panel(details_table, title="[bold #00a8ff]Security Details[/]", expand=False))
+            
+            export_results(scan_results, host)
         
         if console.input("\n[bold]Scan another target? (y/n): [/]").strip().lower() != 'y':
             break
