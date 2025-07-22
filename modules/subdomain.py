@@ -1,3 +1,4 @@
+# modules/subdomain.py
 import dns.resolver
 import random
 import socket
