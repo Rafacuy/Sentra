@@ -13,6 +13,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from core.utils import clear_console
+import os
+
+tls_binary = "bin/tls-client"
+if os.name == "nt":
+    tls_binary += ".exe"
 
 console = Console()
 
@@ -155,7 +160,7 @@ def check_tls_with_tls_client(host: str) -> Dict:
     console.print("[yellow]Standard protocol check failed. Attempting fallback with 'tls-client'...[/yellow]")
     console.print("[dim]This requires 'tls-client' to be installed and in your system's PATH.[/dim]")
     
-    command = ["tls-client", "-u", f"https://{host}", "-j"]
+    command = [tls_binary, "-u", f"https://{host}", "-j"]
     result = {}
 
     try:

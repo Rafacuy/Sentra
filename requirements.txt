@@ -18,4 +18,6 @@ datetime
 
 pathlib
 
+PySocks
+
 socks

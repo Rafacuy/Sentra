@@ -38,7 +38,7 @@ SENTRA is a powerful yet beginner-friendly penetration testing tool designed to 
 
 1. **Clone the Repository**
 ```bash
-https://github.com/Rafacuy/Sentra.git
+git clone https://github.com/Rafacuy/Sentra.git
 cd Sentra
 ```
 
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 
 And install the `tls-client` using golang:
 ```bash
-go install github.com/bp0lr/tls-client@latest
+go install github.com/bogdanfinn/tls-client@latest
 ```
 
 3. **Run SENTRA**
