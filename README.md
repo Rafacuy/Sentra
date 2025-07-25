@@ -51,11 +51,6 @@ Or install the `requirements.txt` directly:
 pip install -r requirements.txt
 ```
 
-And install the `tls-client` using golang:
-```bash
-go install github.com/bogdanfinn/tls-client@latest
-```
-
 3. **Run SENTRA**
 ```bash
 python sentra.py

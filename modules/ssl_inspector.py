@@ -3,7 +3,6 @@ import socket
 import ssl
 import json
 import time
-import subprocess
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from cryptography import x509
@@ -13,11 +12,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from core.utils import clear_console
-import os
-
-tls_binary = "bin/tls-client"
-if os.name == "nt":
-    tls_binary += ".exe"
 
 console = Console()
 
@@ -61,14 +55,14 @@ def export_results(results: Dict[str, Any], host: str):
                     else:
                         f.write(f"{value}\n")
                     f.write("\n")
-        console.print(f"[green]✔ Results exported successfully to [bold]{filename}[/bold][/green]")
+        console.print(f"[green]✔ Results successfully exported to [bold]{filename}[/bold][/green]")
     except IOError as e:
         console.print(f"[red]Error exporting results: {e}[/red]")
 
 
 # --- TLS Score Calculation ---
 def calculate_tls_score(results: Dict[str, Any]) -> Tuple[str, int]:
-    """Calculates a TLS score based on various security metrics."""
+    """Calculates the TLS score based on various security metrics."""
     score = 100
     grade = "A+"
 
@@ -81,7 +75,7 @@ def calculate_tls_score(results: Dict[str, Any]) -> Tuple[str, int]:
         score -= 20
     if protocols.get('TLSv1.0', False):
         score -= 30
-    if protocols.get('SSLv3', False):
+    if protocols.get('SSLv3', False): # Although not checked, still a penalty if present
         score -= 40
 
     if results['cipher_analysis']['strength'] == 'Weak':
@@ -119,7 +113,7 @@ def calculate_tls_score(results: Dict[str, Any]) -> Tuple[str, int]:
 
 
 def resolve_host(host: str) -> Optional[str]:
-    """Resolve hostname to IP address with error handling."""
+    """Resolves a hostname to an IP address with error handling."""
     try:
         with console.status("[bold green]Resolving DNS...[/]", spinner="earth"):
             return socket.gethostbyname(host)
@@ -131,7 +125,7 @@ def resolve_host(host: str) -> Optional[str]:
         return None
 
 def get_certificate_details(cert: x509.Certificate) -> Dict:
-    """Parse X.509 certificate details using cryptography."""
+    """Parses X.509 certificate details using cryptography."""
     details = {
         'subject': {attr.oid._name: attr.value for attr in cert.subject},
         'issuer': {attr.oid._name: attr.value for attr in cert.issuer},
@@ -152,52 +146,8 @@ def get_certificate_details(cert: x509.Certificate) -> Dict:
         details['key_size'] = pub_key.curve.key_size
     return details
 
-def check_tls_with_tls_client(host: str) -> Dict:
-    """
-    Uses the external 'tls-client' tool as a fallback to detect TLS version
-    and cipher suite, which can help bypass certain TLS fingerprinting defenses.
-    """
-    console.print("[yellow]Standard protocol check failed. Attempting fallback with 'tls-client'...[/yellow]")
-    console.print("[dim]This requires 'tls-client' to be installed and in your system's PATH.[/dim]")
-    
-    command = [tls_binary, "-u", f"https://{host}", "-j"]
-    result = {}
-
-    try:
-        process = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=15
-        )
-        client_data = json.loads(process.stdout)
-        
-        if "tls_version" in client_data and "cipher_suite" in client_data:
-            result = {
-                "tls_version": client_data["tls_version"],
-                "cipher_suite": client_data["cipher_suite"]
-            }
-            console.print(f"[green]✔ Fallback successful. Detected {result['tls_version']}[/green]")
-        else:
-            console.print("[red]✖ Fallback failed: Unexpected JSON structure from tls-client.[/red]")
-
-    except FileNotFoundError:
-        console.print("[bold red]✖ Fallback Error: 'tls-client' command not found.[/bold red]")
-    except subprocess.CalledProcessError as e:
-        console.print(f"[bold red]✖ Fallback Error: tls-client exited with an error.[/bold red]")
-        console.print(f"[dim]Stderr: {e.stderr.strip()}[/dim]")
-    except json.JSONDecodeError:
-        console.print("[bold red]✖ Fallback Error: Failed to parse JSON output from tls-client.[/bold red]")
-    except subprocess.TimeoutExpired:
-        console.print("[bold red]✖ Fallback Error: tls-client command timed out.[/bold red]")
-    except Exception as e:
-        console.print(f"[bold red]✖ An unexpected error occurred during fallback: {e}[/bold red]")
-        
-    return result
-
 def check_protocol_support(host: str, port: int) -> Dict[str, bool]:
-    """Explicitly check for each major SSL/TLS protocol version."""
+    """Explicitly checks each major SSL/TLS protocol version."""
     supported_protocols = {
         'TLSv1.3': False, 'TLSv1.2': False, 'TLSv1.1': False, 'TLSv1.0': False
     }
@@ -226,7 +176,7 @@ def check_protocol_support(host: str, port: int) -> Dict[str, bool]:
 
 
 def analyze_cipher(cipher: Tuple) -> Dict:
-    """Analyze cipher strength and vulnerabilities."""
+    """Analyzes cipher strength and vulnerabilities."""
     name, _, bits = cipher
     analysis = {'strength': 'Strong', 'color': 'green', 'details': []}
     
@@ -248,7 +198,7 @@ def analyze_cipher(cipher: Tuple) -> Dict:
     return analysis
 
 def check_certificate_chain(host: str, port: int) -> Dict:
-    """Retrieves and analyzes the full certificate chain from the server."""
+    """Fetches and analyzes the full certificate chain from the server."""
     chain_details = {'chain': [], 'is_chain_complete': False, 'chain_length': 0, 'error': None}
     try:
         context = ssl.create_default_context()
@@ -324,27 +274,6 @@ def run_ssl_inspector():
                     scan_results['cipher_analysis'] = analyze_cipher(s.cipher())
                     scan_results['chain_details'] = check_certificate_chain(host, port)
                     
-                    # --- Fallback Logic ---
-                    protocols = scan_results['protocols']
-                    if all(supported is False for supported in protocols.values()):
-                        fallback_result = check_tls_with_tls_client(host)
-                        if fallback_result and "tls_version" in fallback_result:
-                            protocols['note'] = "Detected via tls-client fallback"
-                            version_map = {
-                                "TLS 1.3": "TLSv1.3",
-                                "TLS 1.2": "TLSv1.2",
-                                "TLS 1.1": "TLSv1.1",
-                                "TLS 1.0": "TLSv1.0",
-                            }
-                            version_key = version_map.get(fallback_result["tls_version"].strip(), None)
-
-                            if version_key in protocols:
-                                protocols[version_key] = True
-                            # Override cipher info with fallback data
-                            scan_results['cipher'] = (fallback_result['cipher_suite'], 'Fallback', 'N/A')
-                            scan_results['cipher_analysis']['strength'] = 'Unknown'
-                            scan_results['cipher_analysis']['color'] = 'cyan'
-                    
                     now = datetime.now(datetime.now().astimezone().tzinfo)
                     scan_results['validity'] = {
                         'not_valid_after': cert.not_valid_after_utc,
@@ -360,21 +289,21 @@ def run_ssl_inspector():
                     break
 
             except socket.timeout:
-                console.print(f"[yellow]Connection timeout on attempt {attempt + 1}. Retrying...[/yellow]")
+                console.print(f"[yellow]Connection timed out on attempt {attempt + 1}. Retrying...[/yellow]")
                 time.sleep(1)
             except Exception as e:
                 console.print(f"[bold red]An error occurred: {type(e).__name__} - {e}[/bold red]")
                 break
 
         if not connection_success:
-            console.print("[bold red]❌ Failed to connect to the server after all attempts.[/bold red]")
+            console.print("[bold red]❌ Failed to connect to server after all attempts.[/bold red]")
         else:
-            # --- Build and Print Output ---
+            # --- Building and Printing Output ---
             console.rule(f"[bold]Scan Report for {host}:{port}[/bold]", style="#00a8ff")
             
             grade, score = scan_results['tls_score']['grade'], scan_results['tls_score']['score']
             score_color = {"A+": "green", "A": "green", "B": "yellow", "C": "yellow", "D": "red", "F": "red"}.get(grade, "red")
-            console.print(Panel(f"[{score_color} bold]{grade}[/]\nScore: {score}/100", title="[bold]Overall Grade[/]", style=score_color, width=25))
+            console.print(Panel(f"[{score_color} bold]{grade}[/]\nScore: {score}/100", title="[bold]Overall Rating[/]", style=score_color, width=25))
 
             cert_details = scan_results['certificate_details']
             cert_info = (f"[bold]Common Name:[/] {cert_details['subject'].get('commonName', 'N/A')}\n"
@@ -390,13 +319,11 @@ def run_ssl_inspector():
             v_style = "green" if validity['days_remaining'] > 30 else "yellow" if validity['days_remaining'] > 0 else "red"
             v_text = f"[{v_style}]Expires in {validity['days_remaining']} days ({validity['not_valid_after']:%Y-%m-%d})[/{v_style}]"
             if validity['is_expired']: v_text = "[bold red]❌ Certificate has expired![/bold red]"
-            if validity['is_not_yet_valid']: v_text = f"[bold red]⚠️ Not valid until {validity['not_valid_before']:%Y-%m-%d}[/bold red]"
+            if validity['is_not_yet_valid']: v_text = f"[bold red]⚠️ Not yet valid until {validity['not_valid_before']:%Y-%m-%d}[/bold red]"
             details_table.add_row("Validity", v_text)
 
             protocols = scan_results['protocols']
-            proto_note = protocols.pop('note', None)
             proto_status = ' '.join([f"[{'green' if sup else 'red'}]{p.replace('TLSv', '1.')}[/]" for p, sup in protocols.items()])
-            if proto_note: proto_status += " [dim cyan](Fallback Used)[/dim cyan]"
             details_table.add_row("Protocols", proto_status)
 
             c_analysis = scan_results['cipher_analysis']
@@ -405,9 +332,9 @@ def run_ssl_inspector():
 
             chain = scan_results['chain_details']
             chain_color = "green" if chain['is_chain_complete'] else "yellow"
-            chain_text = f"[{chain_color}]{chain['chain_length']} certs found. Complete: {chain['is_chain_complete']}[/{chain_color}]"
+            chain_text = f"[{chain_color}]{chain['chain_length']} certificates found. Complete: {chain['is_chain_complete']}[/{chain_color}]"
             if chain['error']: chain_text += f"\n[dim yellow]({chain['error']})[/dim yellow]"
-            details_table.add_row("Cert Chain", chain_text)
+            details_table.add_row("Certificate Chain", chain_text)
 
             console.print(Panel(details_table, title="[bold #00a8ff]Security Details[/]", expand=False))
             

@@ -102,13 +102,6 @@ echo -e "${CYAN}   (This may take 3-5 minutes)${RESET}"
 spinner $!
 echo -e "${GREEN} ✓ Cryptography installed!${RESET}"
 
-# install tls-client
-echo -e "\n${YELLOW}[⚙] DOWNLOADING TLS-CLIENT BINARY${RESET}"
-mkdir -p bin/
-curl -L https://github.com/daffainfo/tls-client-binaries/raw/main/tls-client-linux-arm64 -o bin/tls-client > /dev/null 2>&1
-chmod +x bin/tls-client
-echo -e "${GREEN} ✓ tls-client binary installed!${RESET}"
-
 # Install requirements
 echo -e "\n${YELLOW}[⚙] INSTALLING PROJECT REQUIREMENTS${RESET}"
 if [ -f requirements.txt ]; then
